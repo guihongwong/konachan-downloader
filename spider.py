@@ -1,61 +1,88 @@
 import os
-import time
-from concurrent.futures import ThreadPoolExecutor
-from itertools import repeat
-
 import requests
 from lxml import etree
+from time import sleep
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+}
+
+BASE_URL = "https://konachan.net/post?page={page}&tags={keyword}"
 
 
-def download(image_url, to_dir):
-    suffix = image_url.split('.')[-1]
-    image_id = image_url.split('/')[-1].split('%20')[2]  # 从url里获取id
-    filename = os.path.join(to_dir, "%s.%s" % (image_id, suffix))
-    if not os.path.exists(filename):
+def fetch_html(url, retry=3):
+    """获取 HTML（bytes），自动重试"""
+    for i in range(retry):
         try:
-            response = requests.get(image_url)
-            with open(filename, 'wb') as f:
-                f.write(response.content)
-                print("downloaded:", filename)
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp.raise_for_status()
+            return resp.content  # ★ 返回 bytes，避免 lxml 报错
         except Exception as e:
-            print("WARNING: image download failed: id=%s, url=%s" % (image_id, image_url))
-            print(e)
+            print(f"[WARN] fetch failed ({i+1}/{retry}): {e}")
+            sleep(1)
+    return None
 
 
-def get_pages(from_page=1, to_page=10000, to_dir=None, search_keyword=''):
-    workers = 16
-    url_mode = 'http://konachan.net/post?page=%s&tags=' + search_keyword
-    xpath_images = "//a[@class='directlink largeimg' or @class='directlink smallimg']/@href"
-    if not os.path.exists(to_dir):
-        os.makedirs(to_dir)
+def parse_image_urls(html_bytes):
+    """解析页面中的图片 URL"""
+    parser = etree.HTMLParser(recover=True)  # ★ 自动修复坏标签
+    tree = etree.HTML(html_bytes, parser=parser)
 
-    for page in range(from_page, to_page):
-        time.sleep(1)
-        page_url = url_mode % page
-        print("view page:", page, page_url)
-        try:
-            html = requests.get(page_url).text
-        except:
-            print("WARNING: request page failed, page=%s, url=%s" % (page, page_url))
+    # Konachan 缩略图结构：<a class="directlink largeimg" href="...">
+    urls = tree.xpath('//a[@class="directlink largeimg"]/@href')
+    return urls
+
+
+def download_image(url, save_dir):
+    """下载单张图片"""
+    filename = url.split("/")[-1]
+    path = os.path.join(save_dir, filename)
+
+    if os.path.exists(path):
+        print(f"skip exists: {filename}")
+        return
+
+    try:
+        img = requests.get(url, headers=HEADERS, timeout=10).content
+        with open(path, "wb") as f:
+            f.write(img)
+        print(f"downloaded: {filename}")
+    except Exception as e:
+        print(f"[ERROR] download failed {url}: {e}")
+
+
+def get_pages(from_page, to_page, to_dir, keyword):
+    os.makedirs(to_dir, exist_ok=True)
+
+    for page in range(from_page, to_page + 1):
+        url = BASE_URL.format(page=page, keyword=keyword)
+        print(f"view page: {page} {url}")
+
+        html = fetch_html(url)
+        if not html:
+            print(f"[ERROR] skip page {page}, fetch failed")
             continue
-        tree = etree.HTML(html)
-        image_urls = tree.xpath(xpath_images)
-        print("image count of this page:", len(image_urls))
 
-        with ThreadPoolExecutor(workers) as executor:
-            executor.map(download, image_urls, repeat(to_dir), timeout=100)
+        img_urls = parse_image_urls(html)
+        print(f"image count of this page: {len(img_urls)}")
+
+        for img in img_urls:
+            download_image(img, to_dir)
+
+        sleep(0.5)  # 防止访问过快被封
 
 
 def main():
-    from argparse import ArgumentParser
-    parser = ArgumentParser()
-    parser.add_argument('--to_dir', required=True, help="saving dir")
-    parser.add_argument('--keyword', default='', type=str, help="search keyword")
-    parser.add_argument('--from_page', default=1, type=int, help="first page to download")
-    parser.add_argument('--to_page', default=10000, type=int, help="last page to download")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--from_page", type=int, default=1)
+    parser.add_argument("--to_page", type=int, default=5)
+    parser.add_argument("--keyword", type=str, default="kirisame_marisa")
+    parser.add_argument("--to_dir", type=str, default="downloads")
     args = parser.parse_args()
-    get_pages(from_page=args.from_page, to_page=args.to_page, to_dir=args.to_dir, search_keyword=args.keyword)
+
+    get_pages(args.from_page, args.to_page, args.to_dir, args.keyword)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
